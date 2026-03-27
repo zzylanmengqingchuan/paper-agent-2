@@ -1,89 +1,60 @@
 import { MessagesAnnotation } from "@langchain/langgraph";
-import { isSystemMessage, HumanMessage } from "@langchain/core/messages";
+import { isSystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
 import { llm } from "./model.js";
-import { SYSTEM_PROMPT } from "./prompt.js";
-import { PDFParse } from "pdf-parse";
+import { createSystemPrompt } from "./prompt.js";
 
-// 从 base64 PDF 提取文本
-async function extractPdfText(base64Data: string): Promise<string> {
-  const buffer = Buffer.from(base64Data, "base64");
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  await parser.destroy();
-  return result.text;
+// 过滤消息内容中的 file 类型
+function filterFileContent(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  return content.filter(
+    (item) => !(item && typeof item === "object" && (item as Record<string, unknown>).type === "file")
+  );
 }
 
-// 检测并处理 PDF 文件，返回过滤后的内容
-async function detectAndPrintPdf(content: unknown): Promise<{ filtered: unknown[]; foundPdf: boolean }> {
-  if (!Array.isArray(content)) return { filtered: [content], foundPdf: false };
+// 从 messages 中提取所有 PDF 文本
+function extractAllPdfTexts(messages: BaseMessage[]): string | undefined {
+  const allPdfTexts: string[] = [];
 
-  const filtered: unknown[] = [];
-  let foundPdf = false;
-
-  for (const item of content) {
-    if (
-      item &&
-      typeof item === "object" &&
-      (item as Record<string, unknown>).type === "file" &&
-      (item as Record<string, unknown>).mimeType === "application/pdf"
-    ) {
-      const fileItem = item as Record<string, unknown>;
-      const metadata = fileItem.metadata as Record<string, unknown> | undefined;
-      console.log("=== PDF Detected ===");
-      console.log("PDF fileName:", metadata?.filename);
-
-      // 提取并打印 PDF 文本内容
-      const base64Data = fileItem.data as string;
-      try {
-        const text = await extractPdfText(base64Data);
-        console.log("PDF Text Content:");
-        console.log(text);
-      } catch (error) {
-        console.error("Failed to extract PDF text:", error);
-      }
-
-      foundPdf = true;
-    } else {
-      filtered.push(item);
+  for (const msg of messages) {
+    const additionalKwargs = (msg as HumanMessage).additional_kwargs;
+    const pdfTexts = additionalKwargs?.pdfTexts as string[] | undefined;
+    if (pdfTexts && pdfTexts.length > 0) {
+      allPdfTexts.push(...pdfTexts);
     }
   }
 
-  return { filtered, foundPdf };
+  if (allPdfTexts.length === 0) return undefined;
+  return allPdfTexts.join("\n\n---\n\n");
 }
 
 // 定义 agent 节点：调用 LLM 并返回响应
 export async function callModel(state: typeof MessagesAnnotation.State) {
-  // 只在消息列表中没有 system message 时才添加
-  const hasSystemMessage = state.messages.some(isSystemMessage);
-  let messages = hasSystemMessage ? state.messages : [SYSTEM_PROMPT, ...state.messages];
+  const messages = state.messages;
 
-  // 处理最后一条消息：检测 PDF 并过滤掉 file 类型
-  const lastMessage = messages[messages.length - 1];
-  if (lastMessage && typeof lastMessage === "object" && "content" in lastMessage) {
-    const content = (lastMessage as unknown as Record<string, unknown>).content;
-    const { filtered, foundPdf } = await detectAndPrintPdf(content);
+  // 提取所有 PDF 文本
+  const pdfContent = extractAllPdfTexts(messages);
 
-    if (foundPdf) {
-      if (filtered.length > 0) {
-        // 创建新的 HumanMessage 替换原消息
-        const newMessage = new HumanMessage({
-          content: filtered,
-          additional_kwargs: lastMessage.additional_kwargs,
-        } as unknown as ConstructorParameters<typeof HumanMessage>[0]);
-        messages = [...messages.slice(0, -1), newMessage];
-        console.log("=== Filtered message content ===");
-        console.log(JSON.stringify(filtered, null, 2));
-      } else {
-        // 如果只有 PDF 没有其他内容，创建一个空文本消息
-        const newMessage = new HumanMessage({
-          content: "[用户上传了 PDF 文件]",
-          additional_kwargs: lastMessage.additional_kwargs,
-        } as unknown as ConstructorParameters<typeof HumanMessage>[0]);
-        messages = [...messages.slice(0, -1), newMessage];
-      }
-    }
-  }
+  // 过滤 messages，移除 type=file 的内容，生成 newMessages
+  const newMessages: BaseMessage[] = messages.map((msg) => {
+    const msgObj = msg as unknown as Record<string, unknown>;
+    const content = msgObj.content;
+    const additionalKwargs = (msg as HumanMessage).additional_kwargs;
 
-  const response = await llm.invoke(messages);
+    // 过滤 file 类型
+    const filteredContent = filterFileContent(content);
+
+    // 创建新消息
+    return new HumanMessage({
+      content: filteredContent,
+      additional_kwargs: additionalKwargs,
+    } as unknown as ConstructorParameters<typeof HumanMessage>[0]);
+  });
+
+  // 使用 newMessages 和动态生成的 system prompt
+  const hasSystemMessage = messages.some(isSystemMessage);
+  const systemPrompt = createSystemPrompt(pdfContent);
+  const messagesWithSystem = hasSystemMessage ? newMessages : [systemPrompt, ...newMessages];
+
+  const response = await llm.invoke(messagesWithSystem);
   return { messages: response };
 }
