@@ -1,8 +1,17 @@
 import { MessagesAnnotation, StateGraph } from "@langchain/langgraph";
 import { toolsCondition } from "@langchain/langgraph/prebuilt";
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { callModel } from "./agent/callModel.js";
 import { toolNode } from "./agent/toolNode.js";
 import { processPdf } from "./agent/processPdf.js";
+
+// 创建 Postgres checkpointer
+const checkpointer = PostgresSaver.fromConnString(
+  process.env.DB_URL || ""
+);
+
+// 初始化数据库表（首次运行时创建）
+await checkpointer.setup();
 
 // 创建带有工具的 graph
 const workflow = new StateGraph(MessagesAnnotation)
@@ -19,5 +28,5 @@ const workflow = new StateGraph(MessagesAnnotation)
   // tools 节点执行后返回 callModel
   .addEdge("tools", "callModel");
 
-// 编译 graph
-export const graph = workflow.compile();
+// 编译 graph 并传入 checkpointer
+export const graph = workflow.compile({ checkpointer });
