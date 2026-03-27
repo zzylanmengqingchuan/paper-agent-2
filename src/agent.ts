@@ -1,10 +1,13 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { MessagesAnnotation, StateGraph } from "@langchain/langgraph";
 
-// 创建 LLM 实例
+// 创建 DeepSeek LLM 实例
 const llm = new ChatOpenAI({
-  model: "gpt-4o-mini",
+  model: process.env.MODEL_NAME || "deepseek-chat",
   temperature: 0,
+  configuration: {
+    baseURL: process.env.BASE_URL || "https://api.deepseek.com",
+  },
 });
 
 // 定义 agent 节点：调用 LLM 并返回响应
